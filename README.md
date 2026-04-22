@@ -20,7 +20,7 @@ pytorch-sparse==0.6.18
 
 numpy==1.26.4
 
-## How to run:
+## Example of how to run:
 
 ### TUDatasets:
 
