@@ -41,7 +41,7 @@ parser.add_argument('--pooling_ratio', type=float, default=0.5,
                     help='pooling ratio')
 parser.add_argument('--dropout_ratio', type=float, default=0.5,
                     help='dropout')
-parser.add_argument('--dataset', type=str, default='NCI1',
+parser.add_argument('--dataset', type=str, default='ogbg-molbace',
                     help='COX2_MD/ER_MD/DD/MUTAG/Mutagenicity/NCI1/NCI109/PROTEINS/ogbg-molhiv/ogbg-molbace')
 parser.add_argument('--batch_size', type=int, default=128,
                     help='batch size')
@@ -57,7 +57,7 @@ parser.add_argument('--model_save', type=str, default='latest.pth',
                     help='model save file name')
 parser.add_argument('--feature_as_label', type=int, default='6',
                     help='which feature to use as label, set between 0-8, only for ogb datasets')
-parser.add_argument('--collection', type=str, default='tud',
+parser.add_argument('--collection', type=str, default='ogb',
                     help='Dataset source: set to tud OR ogb')
 parser.add_argument('--model', type=str, default='BiView',
                     help='eg. BiView')
@@ -260,129 +260,145 @@ def node_hom_compatibility(data, args):
 
 
 #Train and test model
-for j in range(samples):
-    print("Sample: ", j)
-    modified_dataset = []
-    hom_mask_sum = 0
-    het_mask_sum = 0
-    for i in range(len(dataset)):
-        data = dataset[i]
-        #Generate Masks
-        if data.y.dim() > 1: 
-            data.y = data.y[0]
-        if args.model == 'BiViewTwoHop' or args.model == 'BiViewTwoHopSum':
-            two_hop = TwoHop()
-            data = two_hop(data)
-            if args.collection == 'ogb':
-                data.homophily_mask = ogb_generate_homophily_mask(data.edge_index, data.x, args.feature_as_label)
-                data.heterophily_mask = ogb_generate_heterophily_mask(data.edge_index, data.x, args.feature_as_label)
-                data.two_hop_homophily_mask = ogb_generate_homophily_mask(data.two_hop_edge_index, data.x, args.feature_as_label)
-                data.two_hop_heterophily_mask = ogb_generate_heterophily_mask(data.two_hop_edge_index, data.x, args.feature_as_label)
-            else:
-                data.homophily_mask = generate_homophily_mask(data.edge_index, data.x)
-                data.heterophily_mask = generate_heterophily_mask(data.edge_index, data.x)
-                data.two_hop_homophily_mask = generate_homophily_mask(data.two_hop_edge_index, data.x)
-                data.two_hop_heterophily_mask = generate_heterophily_mask(data.two_hop_edge_index, data.x)
-        
+modified_dataset = []
+hom_mask_sum = 0
+het_mask_sum = 0
+for i in range(len(dataset)):
+    data = dataset[i]
+    #Generate Masks
+    if data.y.dim() > 1: 
+        data.y = data.y[0]
+    if args.model == 'BiViewTwoHop' or args.model == 'BiViewTwoHopSum':
+        two_hop = TwoHop()
+        data = two_hop(data)
+        if args.collection == 'ogb':
+            data.homophily_mask = ogb_generate_homophily_mask(data.edge_index, data.x, args.feature_as_label)
+            data.heterophily_mask = ogb_generate_heterophily_mask(data.edge_index, data.x, args.feature_as_label)
+            data.two_hop_homophily_mask = ogb_generate_homophily_mask(data.two_hop_edge_index, data.x, args.feature_as_label)
+            data.two_hop_heterophily_mask = ogb_generate_heterophily_mask(data.two_hop_edge_index, data.x, args.feature_as_label)
         else:
-            if args.collection == 'ogb':
-                data.homophily_mask = ogb_generate_homophily_mask(data.edge_index, data.x, args.feature_as_label)
-                data.heterophily_mask = ogb_generate_heterophily_mask(data.edge_index, data.x, args.feature_as_label)
-            else:
-                data.homophily_mask = generate_homophily_mask(data.edge_index, data.x)
-                data.heterophily_mask = generate_heterophily_mask(data.edge_index, data.x)
-
-        #Random Mask
-        #data.homophily_mask, data.heterophily_mask = generate_random_masks(data.edge_index)
-        data.hom_compatibility = node_hom_compatibility(data, args)
-
-        #Add degrees
-        data.edge_degrees = compute_edge_degrees(data)
-        #Compute homophily and heterophily edge degrees
-        data.hom_edge_degrees, data.het_edge_degrees = compute_hom_het_edge_degrees(data, args.collection, args.feature_as_label)
-        # 2-hop masks
-        if args.model == 'FiveViewGATv2':
-            src, dst = data.edge_index
-            hom_mask = data.homophily_mask
-            two_hop_src, two_hop_dst = [], []
-            hom_hom, mixed, het_het = [], [], []
-            for e1 in range(src.size(0)):
-                i_node = int(src[e1]); j_node = int(dst[e1])
-                type1 = bool(hom_mask[e1])
-                # find edges i->j->k
-                mask2 = (src == j_node)
-                idx2 = mask2.nonzero(as_tuple=False).view(-1)
-                for e2 in idx2:
-                    k_node = int(dst[int(e2)])
-                    if k_node == i_node:
-                        continue
-                    type2 = bool(hom_mask[int(e2)])
-                    two_hop_src.append(i_node)
-                    two_hop_dst.append(k_node)
-                    if type1 and type2:
-                        hom_hom.append(True); mixed.append(False); het_het.append(False)
-                    elif (not type1) and (not type2):
-                        hom_hom.append(False); mixed.append(False); het_het.append(True)
-                    else:
-                        hom_hom.append(False); mixed.append(True); het_het.append(False)
-            data.two_hop_edge_index = torch.stack([
-                torch.tensor(two_hop_src, dtype=torch.long),
-                torch.tensor(two_hop_dst, dtype=torch.long)
-            ], dim=0)
-            data.hom_hom_mask = torch.tensor(hom_hom, dtype=torch.bool)
-            data.mixed_mask = torch.tensor(mixed, dtype=torch.bool)
-            data.het_het_mask = torch.tensor(het_het, dtype=torch.bool)
-        modified_dataset.append(data)
-
-    #Use ogb pre-defined splits
-    if args.collection == 'ogb':
-        split_idx = dataset.get_idx_split() 
-        train_indices = split_idx["train"].tolist()
-        valid_indices = split_idx["valid"].tolist()
-        test_indices = split_idx["test"].tolist()
-
-        train_loader = DataLoader([modified_dataset[i] for i in train_indices], batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader([modified_dataset[i] for i in valid_indices], batch_size=args.batch_size, shuffle=False)
-        test_loader = DataLoader([modified_dataset[i] for i in test_indices], batch_size=1, shuffle=False)
-    #tud split
-    else:
-        training_set, validation_set, test_set = random_split(modified_dataset, [num_training, num_val, num_test])
-        train_loader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader(validation_set,batch_size=args.batch_size,shuffle=False)
-        test_loader = DataLoader(test_set,batch_size=1,shuffle=False)
-
+            data.homophily_mask = generate_homophily_mask(data.edge_index, data.x)
+            data.heterophily_mask = generate_heterophily_mask(data.edge_index, data.x)
+            data.two_hop_homophily_mask = generate_homophily_mask(data.two_hop_edge_index, data.x)
+            data.two_hop_heterophily_mask = generate_heterophily_mask(data.two_hop_edge_index, data.x)
     
-    if args.model == 'BiView':
-        model = BiView(args).to(args.device)
-    elif args.model == 'BiViewDegreeNormalized':
-        model = BiViewDegreeNormalized(args).to(args.device)
-    elif args.model == 'BiViewTwoHop':
-        model = BiViewTwoHop(args).to(args.device)
-    elif args.model == 'BiViewTwoHopSum':
-        model = BiViewTwoHopSum(args).to(args.device)
-    elif args.model == 'BiViewADGN':
-        model = BiViewADGN(args).to(args.device)
-    elif args.model == 'BiViewSGC':
-        model = BiViewSGC(args).to(args.device)
-    elif args.model == 'BiViewBernNet':
-        model = BiViewBernNet(args).to(args.device)
-    elif args.model == 'BiViewFAGCN':
-        model = BiViewFAGCN(args).to(args.device)
-    elif args.model == 'BiViewGCN':
-        model = BiViewGCN(args).to(args.device)
-    elif args.model == 'BiViewMixHop':
-        model = BiViewMixHop(args).to(args.device)
-    elif args.model == 'BiViewCompatibilityWeightedGATv2':
-        model = BiViewCompatibilityWeightedGATv2(args).to(args.device)
-    elif args.model == 'FiveViewGATv2':
-        model = FiveViewGATv2(args).to(args.device)   
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    min_loss = 1e10
-    patience = 0
-    for epoch in range(args.epochs):
-        if epoch == 0:
-            torch.cuda.reset_peak_memory_stats(args.device)
-        print(epoch)
+    else:
+        if args.collection == 'ogb':
+            data.homophily_mask = ogb_generate_homophily_mask(data.edge_index, data.x, args.feature_as_label)
+            data.heterophily_mask = ogb_generate_heterophily_mask(data.edge_index, data.x, args.feature_as_label)
+        else:
+            data.homophily_mask = generate_homophily_mask(data.edge_index, data.x)
+            data.heterophily_mask = generate_heterophily_mask(data.edge_index, data.x)
+
+    #Random Mask
+    #data.homophily_mask, data.heterophily_mask = generate_random_masks(data.edge_index)
+    data.hom_compatibility = node_hom_compatibility(data, args)
+
+    #Add degrees
+    data.edge_degrees = compute_edge_degrees(data)
+    #Compute homophily and heterophily edge degrees
+    data.hom_edge_degrees, data.het_edge_degrees = compute_hom_het_edge_degrees(data, args.collection, args.feature_as_label)
+    # 2-hop masks
+    if args.model == 'FiveViewGATv2':
+        src, dst = data.edge_index
+        hom_mask = data.homophily_mask
+        two_hop_src, two_hop_dst = [], []
+        hom_hom, mixed, het_het = [], [], []
+        for e1 in range(src.size(0)):
+            i_node = int(src[e1]); j_node = int(dst[e1])
+            type1 = bool(hom_mask[e1])
+            # find edges i->j->k
+            mask2 = (src == j_node)
+            idx2 = mask2.nonzero(as_tuple=False).view(-1)
+            for e2 in idx2:
+                k_node = int(dst[int(e2)])
+                if k_node == i_node:
+                    continue
+                type2 = bool(hom_mask[int(e2)])
+                two_hop_src.append(i_node)
+                two_hop_dst.append(k_node)
+                if type1 and type2:
+                    hom_hom.append(True); mixed.append(False); het_het.append(False)
+                elif (not type1) and (not type2):
+                    hom_hom.append(False); mixed.append(False); het_het.append(True)
+                else:
+                    hom_hom.append(False); mixed.append(True); het_het.append(False)
+        data.two_hop_edge_index = torch.stack([
+            torch.tensor(two_hop_src, dtype=torch.long),
+            torch.tensor(two_hop_dst, dtype=torch.long)
+        ], dim=0)
+        data.hom_hom_mask = torch.tensor(hom_hom, dtype=torch.bool)
+        data.mixed_mask = torch.tensor(mixed, dtype=torch.bool)
+        data.het_het_mask = torch.tensor(het_het, dtype=torch.bool)
+    modified_dataset.append(data)
+
+#Use ogb pre-defined splits
+if args.collection == 'ogb':
+    split_idx = dataset.get_idx_split() 
+    train_indices = split_idx["train"].tolist()
+    valid_indices = split_idx["valid"].tolist()
+    test_indices = split_idx["test"].tolist()
+
+    train_loader = DataLoader([modified_dataset[i] for i in train_indices], batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader([modified_dataset[i] for i in valid_indices], batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader([modified_dataset[i] for i in test_indices], batch_size=1, shuffle=False)
+#tud split
+else:
+    training_set, validation_set, test_set = random_split(modified_dataset, [num_training, num_val, num_test])
+    train_loader = DataLoader(training_set, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(validation_set,batch_size=args.batch_size,shuffle=False)
+    test_loader = DataLoader(test_set,batch_size=1,shuffle=False)
+
+
+if args.model == 'BiView':
+    model = BiView(args).to(args.device)
+elif args.model == 'BiViewDegreeNormalized':
+    model = BiViewDegreeNormalized(args).to(args.device)
+elif args.model == 'BiViewTwoHop':
+    model = BiViewTwoHop(args).to(args.device)
+elif args.model == 'BiViewTwoHopSum':
+    model = BiViewTwoHopSum(args).to(args.device)
+elif args.model == 'BiViewADGN':
+    model = BiViewADGN(args).to(args.device)
+elif args.model == 'BiViewSGC':
+    model = BiViewSGC(args).to(args.device)
+elif args.model == 'BiViewBernNet':
+    model = BiViewBernNet(args).to(args.device)
+elif args.model == 'BiViewFAGCN':
+    model = BiViewFAGCN(args).to(args.device)
+elif args.model == 'BiViewGCN':
+    model = BiViewGCN(args).to(args.device)
+elif args.model == 'BiViewMixHop':
+    model = BiViewMixHop(args).to(args.device)
+elif args.model == 'BiViewCompatibilityWeightedGATv2':
+    model = BiViewCompatibilityWeightedGATv2(args).to(args.device)
+elif args.model == 'FiveViewGATv2':
+    model = FiveViewGATv2(args).to(args.device)   
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+min_loss = 1e10
+patience = 0
+for epoch in range(args.epochs):
+    if epoch == 0:
+        torch.cuda.reset_peak_memory_stats(args.device)
+    print(epoch)
+    model.train()
+    for i, data in enumerate(train_loader):
+        data = data.to(args.device)
+        out = model(data, False)
+        loss = F.nll_loss(out, data.y)
+        print("Training loss:{}".format(loss.item()))
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+    val_acc,val_loss = validate(model,val_loader)
+    print("Validation loss:{}\taccuracy:{}".format(val_loss,val_acc))
+    if val_loss < min_loss:
+        torch.save(model.state_dict(),args.model_save)
+        min_loss = val_loss
+        patience = 0
+    else:
+        patience += 1
+    if patience > args.patience:
         model.train()
         for i, data in enumerate(train_loader):
             data = data.to(args.device)
@@ -392,61 +408,43 @@ for j in range(samples):
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-        val_acc,val_loss = validate(model,val_loader)
-        print("Validation loss:{}\taccuracy:{}".format(val_loss,val_acc))
+        val_acc, val_loss = validate(model, val_loader)
+        print("Validation loss:{}\taccuracy:{}".format(val_loss, val_acc))
         if val_loss < min_loss:
-            torch.save(model.state_dict(),args.model_save)
+            torch.save(model.state_dict(), args.model_save)
+            print("Model saved at epoch{}".format(epoch))
             min_loss = val_loss
-            patience = 0
-        else:
-            patience += 1
-        if patience > args.patience:
-            model.train()
-            for i, data in enumerate(train_loader):
-                data = data.to(args.device)
-                out = model(data, False)
-                loss = F.nll_loss(out, data.y)
-                print("Training loss:{}".format(loss.item()))
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-            val_acc, val_loss = validate(model, val_loader)
-            print("Validation loss:{}\taccuracy:{}".format(val_loss, val_acc))
-            if val_loss < min_loss:
-                torch.save(model.state_dict(), args.model_save)
-                print("Model saved at epoch{}".format(epoch))
-                min_loss = val_loss
-            break
+        break
 
-    if args.model == 'BiView':
-        model = BiView(args).to(args.device)
-    elif args.model == 'BiViewDegreeNormalized':
-        model = BiViewDegreeNormalized(args).to(args.device)
-    elif args.model == 'BiViewTwoHop':
-        model = BiViewTwoHop(args).to(args.device)
-    elif args.model == 'BiViewTwoHopSum':
-        model = BiViewTwoHopSum(args).to(args.device)
-    elif args.model == 'BiViewADGN':
-        model = BiViewADGN(args).to(args.device)
-    elif args.model == 'BiViewSGC':
-        model = BiViewSGC(args).to(args.device)
-    elif args.model == 'BiViewBernNet':
-        model = BiViewBernNet(args).to(args.device)
-    elif args.model == 'BiViewFAGCN':
-        model = BiViewFAGCN(args).to(args.device)
-    elif args.model == 'BiViewGCN':
-        model = BiViewGCN(args).to(args.device)
-    elif args.model == 'BiViewMixHop':
-        model = BiViewMixHop(args).to(args.device)
-    elif args.model == 'BiViewCompatibilityWeightedGATv2':
-        model = BiViewCompatibilityWeightedGATv2(args).to(args.device)
-    elif args.model == 'FiveViewGATv2':
-        model = FiveViewGATv2(args).to(args.device)  
-    model.load_state_dict(torch.load(args.model_save))
-    
-    if args.collection == 'tud':
-        test_acc,test_loss = test(model,test_loader)
-        print("Test accuracy:{}".format(test_acc))
-    elif args.collection == 'ogb':
-        test_acc, test_loss, roc_auc = test_roc(model, test_loader)
-        print("ROC-AUC:{}".format(roc_auc))
+if args.model == 'BiView':
+    model = BiView(args).to(args.device)
+elif args.model == 'BiViewDegreeNormalized':
+    model = BiViewDegreeNormalized(args).to(args.device)
+elif args.model == 'BiViewTwoHop':
+    model = BiViewTwoHop(args).to(args.device)
+elif args.model == 'BiViewTwoHopSum':
+    model = BiViewTwoHopSum(args).to(args.device)
+elif args.model == 'BiViewADGN':
+    model = BiViewADGN(args).to(args.device)
+elif args.model == 'BiViewSGC':
+    model = BiViewSGC(args).to(args.device)
+elif args.model == 'BiViewBernNet':
+    model = BiViewBernNet(args).to(args.device)
+elif args.model == 'BiViewFAGCN':
+    model = BiViewFAGCN(args).to(args.device)
+elif args.model == 'BiViewGCN':
+    model = BiViewGCN(args).to(args.device)
+elif args.model == 'BiViewMixHop':
+    model = BiViewMixHop(args).to(args.device)
+elif args.model == 'BiViewCompatibilityWeightedGATv2':
+    model = BiViewCompatibilityWeightedGATv2(args).to(args.device)
+elif args.model == 'FiveViewGATv2':
+    model = FiveViewGATv2(args).to(args.device)  
+model.load_state_dict(torch.load(args.model_save))
+
+if args.collection == 'tud':
+    test_acc,test_loss = test(model,test_loader)
+    print("Test accuracy:{}".format(test_acc))
+elif args.collection == 'ogb':
+    test_acc, test_loss, roc_auc = test_roc(model, test_loader)
+    print("ROC-AUC:{}".format(roc_auc))
